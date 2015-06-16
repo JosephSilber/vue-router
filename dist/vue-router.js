@@ -60,8 +60,10 @@ return /******/ (function(modules) { // webpackBootstrap
 /* 0 */
 /***/ function(module, exports, __webpack_require__) {
 
-	var Recognizer = __webpack_require__(3)
-	var hasPushState = history && history.pushState
+	var Recognizer = __webpack_require__(1)
+	var Route = __webpack_require__(4)
+	var installed = false
+	var Vue
 
 	/**
 	 * Router constructor
@@ -72,13 +74,30 @@ return /******/ (function(modules) { // webpackBootstrap
 	 *                 - {Boolean} pushstate (default: false)
 	 */
 
-	function VueRouter (options) {
+	function Router (options) {
+	  options = options || {}
+
+	  // Vue instances
+	  this.app = null
+	  this._children = []
+
+	  // route recognizer
 	  this._recognizer = new Recognizer()
+	  this._redirectRecognizer = new Recognizer()
+
+	  // state
 	  this._started = false
-	  this._vm = null
-	  this._currentPath = null
-	  this._notfoundHandler = null
-	  this._root = null
+	  this._currentRoute = { path: '' }
+
+	  // feature detection
+	  this._hasPushState = typeof history !== 'undefined' && history.pushState
+
+	  // global handler/hooks
+	  this._notFoundHandler = options.notFound || null
+	  this._beforeEachHook = options.beforeEach || null
+	  this._afterEachHook = options.afterEach || null
+
+	  // resolve root path
 	  var root = options && options.root
 	  if (root) {
 	    // make sure there's the starting slash
@@ -87,17 +106,38 @@ return /******/ (function(modules) { // webpackBootstrap
 	    }
 	    // remove trailing slash
 	    this._root = root.replace(/\/$/, '')
+	  } else {
+	    this._root = null
 	  }
-	  this._hashbang = !(options && options.hashbang === false)
-	  this._pushstate = !!(hasPushState && options && options.pushstate)
+
+	  // mode
+	  this._hashbang = options.hashbang !== false
+	  this._pushstate = !!(this._hasPushState && options.pushstate)
 	}
 
-	var p = VueRouter.prototype
+	/**
+	 * Installation interface.
+	 * Install the necessary directives.
+	 */
+
+	Router.install = function (ExternalVue) {
+	  if (installed) {
+	    warn('vue-router has already been installed.')
+	    return
+	  }
+	  Vue = ExternalVue
+	  installed = true
+	  __webpack_require__(5)(Vue)
+	  __webpack_require__(7)(Vue)
+	  __webpack_require__(8)(Vue, Router)
+	}
 
 	//
 	// Public API
 	//
 	//
+
+	var p = Router.prototype
 
 	/**
 	 * Register a map of top-level paths.
@@ -123,20 +163,20 @@ return /******/ (function(modules) { // webpackBootstrap
 
 	p.on = function (rootPath, config) {
 	  if (rootPath === '*') {
-	    this.notfound(config)
+	    this.notFound(config)
 	  } else {
 	    this._addRoute(rootPath, config, [])
 	  }
 	}
 
 	/**
-	 * Set the notfound route config.
+	 * Set the notFound route config.
 	 *
 	 * @param {Object} config
 	 */
 
-	p.notfound = function (config) {
-	  this._notfoundHandler = [{ handler: config }]
+	p.notFound = function (config) {
+	  this._notFoundHandler = [{ handler: config }]
 	}
 
 	/**
@@ -146,8 +186,29 @@ return /******/ (function(modules) { // webpackBootstrap
 	 */
 
 	p.redirect = function (map) {
-	  // TODO
-	  // use another recognizer to recognize redirects
+	  for (var path in map) {
+	    this._addRedirect(path, map[path])
+	  }
+	}
+
+	/**
+	 * Set global before hook.
+	 *
+	 * @param {Function} fn
+	 */
+
+	p.beforeEach = function (fn) {
+	  this._beforeEachHook = fn
+	}
+
+	/**
+	 * Set global after hook.
+	 *
+	 * @param {Function} fn
+	 */
+
+	p.afterEach = function (fn) {
+	  this._afterEachHook = fn  
 	}
 
 	/**
@@ -156,86 +217,79 @@ return /******/ (function(modules) { // webpackBootstrap
 	 * be resolved against root (if provided)
 	 *
 	 * @param {String} path
+	 * @param {Object} [options]
 	 */
 
-	p.go = function (path) {
+	p.go = function (path, options) {
+	  var replace = options && options.replace
 	  if (this._pushstate) {
 	    // make it relative to root
 	    path = this._root
 	      ? this._root + '/' + path.replace(/^\//, '')
 	      : path
-	    history.pushState({}, '', path)
+	    if (replace) {
+	      history.replaceState({}, '', path)
+	    } else {
+	      history.pushState({}, '', path)
+	    }
 	    this._match(path)
 	  } else {
 	    path = path.replace(/^#!?/, '')
-	    location.hash = this._hashbang
+	    var hash = this._hashbang
 	      ? '!' + path
 	      : path
+	    setHash(hash, replace)
 	  }
+	}
+
+	/**
+	 * Short hand for replacing current path
+	 *
+	 * @param {String} path
+	 */
+
+	p.replace = function (path) {
+	  this.go(path, {
+	    replace: true
+	  })
 	}
 
 	/**
 	 * Start the router.
 	 *
-	 * @param {Vue} vm
+	 * @param {VueConstructor} App
+	 * @param {String|Element} container
 	 */
 
-	p.start = function (vm) {
+	p.start = function (App, container) {
+	  if (!installed) {
+	    throw new Error(
+	      'Please install vue-router with Vue.use() before ' +
+	      'starting the router.'
+	    )
+	  }
 	  if (this._started) {
+	    warn('vue-router has already been started.')
 	    return
 	  }
 	  this._started = true
-	  this._vm = this._vm || vm
-	  if (!this._vm) {
-	    throw new Error(
-	      'vue-router must be started with a root Vue instance.'
-	    )
+	  if (!this.app) {
+	    if (!App || !container) {
+	      throw new Error(
+	        'Must start vue-router with a component and a ' +
+	        'root container.'
+	      )
+	    }
+	    this._appContainer = container
+	    this._appConstructor = typeof App === 'function'
+	      ? App
+	      : Vue.extend(App)
 	  }
 	  if (this._pushstate) {
-	    this.initHistoryMode()
+	    this._initHistoryMode()
 	  } else {
-	    this.initHashMode()
+	    this._initHashMode()
 	  }
-	}
-
-	/**
-	 * Initialize hash mode.
-	 */
-
-	p.initHashMode = function () {
-	  var self = this
-	  this.onRouteChange = function () {
-	    // format hashbang
-	    if (
-	      self._hashbang &&
-	      location.hash &&
-	      location.hash.charAt(1) !== '!'
-	    ) {
-	      location.hash = '!' + location.hash.slice(1)
-	      return
-	    }
-	    var hash = location.hash.replace(/^#!?/, '')
-	    var url = hash + location.search
-	    url = decodeURI(url)
-	    self._match(url)
-	  }
-	  window.addEventListener('hashchange', this.onRouteChange)
-	  this.onRouteChange()
-	}
-
-	/**
-	 * Initialize HTML5 history mode.
-	 */
-
-	p.initHistoryMode = function () {
-	  var self = this
-	  this.onRouteChange = function () {
-	    var url = location.pathname + location.search
-	    url = decodeURI(url)
-	    self._match(url)
-	  }
-	  window.addEventListener('popstate', this.onRouteChange)
-	  this.onRouteChange()
 	}
 
 	/**
@@ -246,8 +300,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	  var event = this._pushstate
 	    ? 'popstate'
 	    : 'hashchange'
-	  window.removeEventListener(event, this.onRouteChange)
-	  this._vm.route = null
+	  window.removeEventListener(event, this._onRouteChange)
 	  this._started = false
 	}
 
@@ -256,26 +309,68 @@ return /******/ (function(modules) { // webpackBootstrap
 	//
 
 	/**
+	 * Initialize hash mode.
+	 */
+
+	p._initHashMode = function () {
+	  var self = this
+	  this._onRouteChange = function () {
+	    // format hashbang
+	    var hash = location.hash
+	    if (self._hashbang && hash && hash.charAt(1) !== '!') {
+	      setHash('!' + hash.slice(1), true)
+	      return
+	    }
+	    if (!self._hashbang && hash && hash.charAt(1) === '!') {
+	      setHash(hash.slice(2), true)
+	      return
+	    }
+	    hash = hash.replace(/^#!?/, '')
+	    var url = hash + location.search
+	    url = decodeURI(url)
+	    self._match(url)
+	  }
+	  window.addEventListener('hashchange', this._onRouteChange)
+	  this._onRouteChange()
+	}
+
+	/**
+	 * Initialize HTML5 history mode.
+	 */
+
+	p._initHistoryMode = function () {
+	  var self = this
+	  this._onRouteChange = function () {
+	    var url = location.pathname + location.search
+	    url = decodeURI(url)
+	    self._match(url)
+	  }
+	  window.addEventListener('popstate', this._onRouteChange)
+	  this._onRouteChange()
+	}
+
+	/**
 	 * Add a route containing a list of segments to the internal
 	 * route recognizer. Will be called recursively to add all
 	 * possible sub-routes.
 	 *
 	 * @param {String} path
-	 * @param {Object} config
+	 * @param {Object} handler
 	 * @param {Array} segments
 	 */
-	p._addRoute = function (path, config, segments) {
+
+	p._addRoute = function (path, handler, segments) {
 	  segments.push({
 	    path: path,
-	    handler: config
+	    handler: handler
 	  })
 	  this._recognizer.add(segments)
-	  if (config.subRoutes) {
-	    for (var subPath in config.subRoutes) {
+	  if (handler.subRoutes) {
+	    for (var subPath in handler.subRoutes) {
 	      // recursively walk all sub routes
 	      this._addRoute(
 	        subPath,
-	        config.subRoutes[subPath],
+	        handler.subRoutes[subPath],
 	        // pass a copy in recursion to avoid mutating
 	        // across branches
 	        segments.slice()
@@ -285,16 +380,64 @@ return /******/ (function(modules) { // webpackBootstrap
 	}
 
 	/**
+	 * Add a redirect record.
+	 *
+	 * @param {String} path
+	 * @param {String} redirectPath
+	 */
+
+	p._addRedirect = function (path, redirectPath) {
+	  var router = this
+	  this._redirectRecognizer.add([{
+	    path: path,
+	    handler: function (match) {
+	      var realPath = redirectPath
+	      if (match.isDynamic) {
+	        var realPath = redirectPath
+	        for (var key in match.params) {
+	          var regex = new RegExp(':' + key + '(\\/|$)')
+	          var value = match.params[key]
+	          realPath = realPath.replace(regex, value)
+	        } 
+	      }
+	      router.replace(realPath)
+	    }
+	  }])
+	}
+
+	/**
+	 * Check if a path matches any redirect records.
+	 *
+	 * @param {String} path
+	 * @return {Boolean} - if true, will skip normal match.
+	 */
+
+	p._checkRedirect = function (path) {
+	  var matched = this._redirectRecognizer.recognize(path)
+	  if (matched) {
+	    matched[0].handler(matched[0])
+	    return true
+	  }
+	}
+
+	/**
 	 * Match a URL path and set the route context on vm,
 	 * triggering view updates.
 	 *
 	 * @param {String} path
 	 */
+
 	p._match = function (path) {
-	  if (path === this._currentPath) {
+
+	  if (this._checkRedirect(path)) {
 	    return
 	  }
-	  this._currentPath = path
+
+	  var currentRoute = this._currentRoute
+	  if (this.app && path === currentRoute.path) {
+	    return
+	  }
+
 	  // normalize against root
 	  if (
 	    this._pushstate &&
@@ -303,186 +446,82 @@ return /******/ (function(modules) { // webpackBootstrap
 	  ) {
 	    path = path.slice(this._root.length)
 	  }
-	  var matched = this._recognizer.recognize(path)
-	  // aggregate params
-	  var params
-	  if (matched) {
-	    params = [].reduce.call(matched, function (prev, cur) {
-	      if (cur.params) {
-	        for (var key in cur.params) {
-	          prev[key] = cur.params[key]
-	        }
-	      }
-	      return prev
-	    }, {})
-	  }
+
 	  // construct route context
-	  var context = {
-	    path: path,
-	    params: params,
-	    query: matched && matched.queryParams,
-	    _matched: matched || this._notfoundHandler,
-	    _matchedCount: 0,
-	    _router: this
+	  var route = new Route(path, this)
+
+	  // check gloal before hook
+	  if (this._beforeEachHook) {
+	    var res = this._beforeEachHook.call(null, currentRoute, route)
+	    if (res === false) {
+	      this.replace(currentRoute.path)
+	      return
+	    }
 	  }
-	  this._vm.$set('route', context)
+
+	  if (!this.app) {
+	    // initial render
+	    this.app = new this._appConstructor({
+	      el: this._appContainer,
+	      data: {
+	        route: route
+	      }
+	    })
+	  } else {
+	    // route change
+	    this.app.route = route
+	    this._children.forEach(function (child) {
+	      child.route = route
+	    })
+	  }
+
+	  // check global after hook
+	  if (this._afterEachHook) {
+	    this._afterEachHook.call(null, currentRoute, route)
+	  }
+
+	  this._currentRoute = route
 	}
 
 	/**
-	 * Installation interface.
-	 * Install the necessary directives.
+	 * Set current hash
+	 *
+	 * @param {String} hash
+	 * @param {Boolean} replace
 	 */
 
-	VueRouter.install = function (Vue) {
-	  __webpack_require__(1)(Vue)
-	  __webpack_require__(2)(Vue)
+	function setHash (hash, replace) {
+	  if (replace) {
+	    var urlLength = location.href.length - location.hash.length
+	    var fullURL = location.href.slice(0, urlLength) + '#' + hash
+	    location.replace(fullURL)
+	  } else {
+	    location.hash = hash
+	  }
 	}
 
-	module.exports = VueRouter
+	/**
+	 * Warning (check console for IE9)
+	 *
+	 * @param {String} msg
+	 */
+
+	function warn (msg) {
+	  if (typeof console !== 'undefined') {
+	    console.warn(msg)
+	  }
+	}
+
+	// auto install
+	if (window.Vue) {
+	  Router.install(window.Vue)
+	}
+
+	module.exports = Router
+
 
 /***/ },
 /* 1 */
-/***/ function(module, exports, __webpack_require__) {
-
-	// install the v-view directive
-
-	module.exports = function (Vue) {
-
-	  // insert global css to make sure router-view has
-	  // display:block so that transitions work properly
-	  __webpack_require__(4)('router-view{display:block;}')
-
-	  var _ = Vue.util
-	  var component = Vue.directive('_component')
-	  var templateParser = Vue.parsers.template
-
-	  // v-view extends v-component
-	  var viewDef = _.extend({}, component)
-
-	  // with some overrides
-	  _.extend(viewDef, {
-
-	    bind: function () {
-	      // react to route change
-	      this.currentRoute = null
-	      this.currentComponentId = null
-	      this.onRouteChange = _.bind(this.onRouteChange, this)
-	      this.unwatch = this.vm.$watch('route', this.onRouteChange)
-	      // force dynamic directive so v-component doesn't
-	      // attempt to build right now
-	      this._isDynamicLiteral = true
-	      // finally, init by delegating to v-component
-	      component.bind.call(this)
-	      if (this.vm.route) {
-	        this.onRouteChange(this.vm.route)
-	      }
-	    },
-
-	    onRouteChange: function (route) {
-	      this.currentRoute = route
-	      if (!route._matched) {
-	        // route not found, this outlet is invalidated
-	        return this.invalidate()
-	      }
-	      var segment = route._matched[route._matchedCount]
-	      if (!segment) {
-	        // no segment that matches this outlet
-	        return this.invalidate()
-	      }
-	      // mutate the route as we pass it further down the
-	      // chain. this series of mutation is done exactly once
-	      // for every route as we match the components to render.
-	      route._matchedCount++
-	      // trigger component switch
-	      if (segment.handler.component !== this.currentComponentId ||
-	          segment.handler.alwaysRefresh) {
-	        // TODO: handle before/after hooks
-	        this.currentComponentId = segment.handler.component
-	        this.update(segment.handler.component)
-	      } else if (this.childVM) {
-	        // update route context
-	        this.childVM.route = route
-	      }
-	    },
-
-	    invalidate: function () {
-	      this.currentComponentId = null
-	      this.update(null)
-	    },
-
-	    // currently duplicating some logic from v-component
-	    // TODO: make it cleaner
-	    build: function () {
-	      var route = this.currentRoute
-	      if (this.keepAlive) {
-	        var cached = this.cache[this.ctorId]
-	        if (cached) {
-	          cached.route = route
-	          return cached
-	        }
-	      }
-	      var vm = this.vm
-	      var el = templateParser.clone(this.el)
-	      if (this.Ctor) {
-	        var child = vm.$addChild({
-	          el: el,
-	          template: this.template,
-	          _asComponent: true,
-	          _host: this._host,
-	          data: {
-	            route: route
-	          }
-	        }, this.Ctor)
-	        if (this.keepAlive) {
-	          this.cache[this.ctorId] = child
-	        }
-	        return child
-	      }
-	    },
-
-	    unbind: function () {
-	      this.unwatch()
-	    }
-
-	  })
-
-	  Vue.elementDirective('router-view', viewDef)
-	}
-
-/***/ },
-/* 2 */
-/***/ function(module, exports, __webpack_require__) {
-
-	// install v-link, which provides navigation support for
-	// HTML5 history mode
-
-	module.exports = function (Vue) {
-
-	  Vue.directive('link', {
-
-	    bind: function () {
-	      var vm = this.vm
-	      var href = this.expression
-	      if (this.el.tagName === 'A') {
-	        this.el.href = href
-	      }
-	      this.handler = function (e) {
-	        e.preventDefault()
-	        vm.route._router.go(href)
-	      }
-	      this.el.addEventListener('click', this.handler)
-	    },
-
-	    unbind: function () {
-	      this.el.removeEventListener('click', this.handler)
-	    }
-
-	  })
-
-	}
-
-/***/ },
-/* 3 */
 /***/ function(module, exports, __webpack_require__) {
 
 	var __WEBPACK_AMD_DEFINE_RESULT__;/* WEBPACK VAR INJECTION */(function(module) {(function() {
@@ -1123,7 +1162,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	    var $$route$recognizer$$default = $$route$recognizer$$RouteRecognizer;
 
 	    /* global define:true module:true window: true */
-	    if ("function" === 'function' && __webpack_require__(5)['amd']) {
+	    if ("function" === 'function' && __webpack_require__(3)['amd']) {
 	      !(__WEBPACK_AMD_DEFINE_RESULT__ = function() { return $$route$recognizer$$default; }.call(exports, __webpack_require__, exports, module), __WEBPACK_AMD_DEFINE_RESULT__ !== undefined && (module.exports = __WEBPACK_AMD_DEFINE_RESULT__));
 	    } else if (typeof module !== 'undefined' && module['exports']) {
 	      module['exports'] = $$route$recognizer$$default;
@@ -1133,10 +1172,271 @@ return /******/ (function(modules) { // webpackBootstrap
 	}).call(this);
 
 	//# sourceMappingURL=route-recognizer.js.map
-	/* WEBPACK VAR INJECTION */}.call(exports, __webpack_require__(6)(module)))
+	/* WEBPACK VAR INJECTION */}.call(exports, __webpack_require__(2)(module)))
+
+/***/ },
+/* 2 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = function(module) {
+		if(!module.webpackPolyfill) {
+			module.deprecate = function() {};
+			module.paths = [];
+			// module.parent = undefined by default
+			module.children = [];
+			module.webpackPolyfill = 1;
+		}
+		return module;
+	}
+
+
+/***/ },
+/* 3 */
+/***/ function(module, exports, __webpack_require__) {
+
+	module.exports = function() { throw new Error("define cannot be used indirect"); };
+
 
 /***/ },
 /* 4 */
+/***/ function(module, exports, __webpack_require__) {
+
+	function Route (path, router) {
+	  this.path = path
+	  var matched = router._recognizer.recognize(path)
+
+	  this.query = matched
+	    ? matched.queryParams
+	    : null
+
+	  this.params = matched
+	    ? [].reduce.call(matched, function (prev, cur) {
+	        if (cur.params) {
+	          for (var key in cur.params) {
+	            prev[key] = cur.params[key]
+	          }
+	        }
+	        return prev
+	      }, {})
+	    : null
+
+	  // private stuff
+	  def(this, '_matched', matched || router._notFoundHandler)
+	  def(this, '_matchedCount', 0, true)
+	  def(this, '_router', router)
+	}
+
+	function def (obj, key, val, writable) {
+	  Object.defineProperty(obj, key, {
+	    value: val,
+	    enumerable: false,
+	    writable: !!writable
+	  })
+	}
+
+	module.exports = Route
+
+
+/***/ },
+/* 5 */
+/***/ function(module, exports, __webpack_require__) {
+
+	// install the <router-view> element directive
+
+	module.exports = function (Vue) {
+
+	  // insert global css to make sure router-view has
+	  // display:block so that transitions work properly
+	  __webpack_require__(6)('router-view{display:block;}')
+
+	  var _ = Vue.util
+	  var component = Vue.directive('_component')
+	  var templateParser = Vue.parsers.template
+
+	  // v-view extends v-component
+	  var viewDef = _.extend({}, component)
+
+	  // with some overrides
+	  _.extend(viewDef, {
+
+	    _isRouterView: true,
+
+	    bind: function () {
+	      // react to route change
+	      this.currentRoute = null
+	      this.currentComponentId = null
+	      this.unwatch = this.vm.$watch(
+	        'route',
+	        _.bind(this.onRouteChange, this),
+	        // important as this makes the watcher execute
+	        // in the internal queue instead of the user queue,
+	        // so that the callback fires before the view is
+	        // affected by the route change.
+	        { user: false }
+	      )
+	      // force dynamic directive so v-component doesn't
+	      // attempt to build right now
+	      this._isDynamicLiteral = true
+	      // finally, init by delegating to v-component
+	      component.bind.call(this)
+	      // initial render
+	      if (this.vm.route) {
+	        this.onRouteChange(this.vm.route)
+	      }
+	    },
+
+	    /**
+	     * Route change handler. Check match, segment and before
+	     * hook to determine whether this view should be
+	     * rendered or switched.
+	     *
+	     * @param {Route} route
+	     */
+
+	    onRouteChange: function (route) {
+	      var previousRoute = this.currentRoute
+	      this.currentRoute = route
+
+	      if (!route._matched) {
+	        // route not found, this outlet is invalidated
+	        return this.invalidate()
+	      }
+
+	      var segment = route._matched[route._matchedCount]
+	      if (!segment) {
+	        // no segment that matches this outlet
+	        return this.invalidate()
+	      }
+
+	      // mutate the route as we pass it further down the
+	      // chain. this series of mutation is done exactly once
+	      // for every route as we match the components to render.
+	      route._matchedCount++
+
+	      // trigger component switch
+	      var handler = segment.handler
+	      if (handler.component !== this.currentComponentId ||
+	          handler.alwaysRefresh) {
+
+	        // call before hook
+	        if (handler.before) {
+	          var beforeResult = handler.before(route, previousRoute)
+	          if (beforeResult === false) {
+	            if (route._router._hasPushState) {
+	              history.back()
+	            } else if (previousRoute) {
+	              route._router.replace(previousRoute.path)
+	            }
+	            return
+	          }
+	        }
+
+	        this.currentComponentId = handler.component
+	        this.switchView(route, previousRoute, handler)
+	      }
+	    },
+
+	    /**
+	     * Switch view from a previous route to a new route.
+	     * Handles the async data loading logic, then delegates
+	     * to the component directive's setComponent method.
+	     *
+	     * @param {Route} route
+	     * @param {Route} previousRoute
+	     * @param {RouteHandler} handler
+	     */
+
+	    switchView: function (route, previousRoute, handler) {
+
+	      var self = this
+	      function mount (data) {
+	        self.setComponent(handler.component, data, null, afterTransition)
+	      }
+
+	      // call data hook
+	      if (handler.data) {
+	        if (handler.waitOnData) {
+	          handler.data(route, mount, onDataError)
+	        } else {
+	          // async data loading with possible race condition.
+	          // the data may load before the component gets
+	          // rendered (due to async components), or it could
+	          // be the other way around.
+	          var _data, _vm
+	          // send out data request...
+	          handler.data(route, function (data) {
+	            if (_vm) {
+	              setData(_vm, data)
+	            } else {
+	              _data = data
+	            }
+	          }, onDataError)
+	          // start the component switch...
+	          this.setComponent(handler.component, { loading: true }, function (vm) {
+	            if (_data) {
+	              setData(vm, _data)
+	            } else {
+	              _vm = vm
+	            }
+	          }, afterTransition)
+	        }
+	      } else {
+	        // no data hook, just set component
+	        mount()
+	      }
+
+	      function setData (vm, data) {
+	        // if the view switched again before the data
+	        // returned, the previous view could be already
+	        // destroyed.
+	        if (vm._isDestroyed) return
+	        for (var key in data) {
+	          vm.$set(key, data[key])
+	        }
+	        vm.loading = false
+	      }
+
+	      function afterTransition () {
+	        // call after hook
+	        if (handler.after) {
+	          handler.after(route, previousRoute)
+	        }
+	      }
+
+	      function onDataError (err) {
+	        console.warn(
+	          'vue-router failed to load data for route: ' +
+	          route.path
+	        )
+	        if (err) {
+	          console.warn(err)
+	        }
+	        mount()
+	      }
+	    },
+
+	    /**
+	     * Clears the unmatched view.
+	     */
+
+	    invalidate: function () {
+	      this.currentComponentId = null
+	      this.setComponent(null)
+	    },
+
+	    unbind: function () {
+	      this.unwatch()
+	      component.unbind.call(this)
+	    }
+
+	  })
+
+	  Vue.elementDirective('router-view', viewDef)
+	}
+
+
+/***/ },
+/* 6 */
 /***/ function(module, exports, __webpack_require__) {
 
 	var inserted = {};
@@ -1164,25 +1464,97 @@ return /******/ (function(modules) { // webpackBootstrap
 
 
 /***/ },
-/* 5 */
+/* 7 */
 /***/ function(module, exports, __webpack_require__) {
 
-	module.exports = function() { throw new Error("define cannot be used indirect"); };
+	// install v-link, which provides navigation support for
+	// HTML5 history mode
+
+	module.exports = function (Vue) {
+
+	  var _ = Vue.util
+
+	  Vue.directive('link', {
+
+	    isLiteral: true,
+
+	    bind: function () {
+	      var vm = this.vm
+	      if (!vm.route) {
+	        _.warn && _.warn(
+	          'v-link can only be used inside a ' +
+	          'router-enabled app.'
+	        )
+	        return
+	      }
+	      var self = this
+	      this.handler = function (e) {
+	        if (e.button === 0) {
+	          e.preventDefault()
+	          vm.route._router.go(self.destination)
+	        }
+	      }
+	      this.el.addEventListener('click', this.handler)
+	      if (!this._isDynamicLiteral) {
+	        this.update(this.expression)
+	      }
+	    },
+
+	    unbind: function () {
+	      this.el.removeEventListener('click', this.handler)
+	    },
+
+	    update: function (value) {
+	      this.destination = value
+	      if (this.el.tagName === 'A') {
+	        this.el.href = value
+	      }
+	    }
+
+	  })
+
+	}
 
 
 /***/ },
-/* 6 */
+/* 8 */
 /***/ function(module, exports, __webpack_require__) {
 
-	module.exports = function(module) {
-		if(!module.webpackPolyfill) {
-			module.deprecate = function() {};
-			module.paths = [];
-			// module.parent = undefined by default
-			module.children = [];
-			module.webpackPolyfill = 1;
-		}
-		return module;
+	// overriding Vue's $addChild method, so that every child
+	// instance inherits the route data
+
+	module.exports = function (Vue, Router) {
+
+	  var addChild = Vue.prototype.$addChild
+
+	  Vue.prototype.$addChild = function (opts, Ctor) {
+
+	    var route = this.route
+	    var router = route && route._router
+	    var isRouterEnabled = router instanceof Router
+
+	    if (isRouterEnabled) {
+	      opts = opts || {}
+	      var data = opts.data = opts.data || {}
+	      data.route = route
+	      if (opts._isRouterView) {
+	        data.loading = data.loading || false
+	      }
+	    }
+
+	    var child = addChild.call(this, opts, Ctor)
+
+	    if (isRouterEnabled) {
+	      // keep track of all children created so we can
+	      // update the routes
+	      router._children.push(child)
+	      child.$on('hook:beforeDestroy', function () {
+	        router._children.$remove(child)
+	      })
+	    }
+
+	    return child
+	  }
 	}
 
 
